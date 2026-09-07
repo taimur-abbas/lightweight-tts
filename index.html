@@ -426,6 +426,19 @@
             border-color: var(--border-focus);
         }
 
+        .settings-select optgroup {
+            font-weight: 600;
+            color: var(--text-muted);
+            background: var(--surface-subtle);
+        }
+
+        .settings-select option {
+            font-weight: 400;
+            color: var(--text-bright);
+            background: var(--background);
+            padding: 4px;
+        }
+
         input[type="range"] {
             -webkit-appearance: none;
             width: 100%;
@@ -593,7 +606,7 @@
                 </div>
 
                 <div class="player-right">
-                    <span>24kHz WAV</span>
+                    <span id="playerFormatLabel">24kHz WAV</span>
                     <a class="btn-download-link" id="btnDownload" href="#" download="speech.wav">download</a>
                 </div>
                 <audio id="audioElement" style="display: none;"></audio>
@@ -620,14 +633,21 @@
                                 <span class="slider-label">voice</span>
                             </div>
                             <select id="voiceSelect" class="settings-select">
-                                <option value="af_heart" selected>af_heart (US Female - Studio)</option>
-                                <option value="af_bella">af_bella (US Female - Warm)</option>
-                                <option value="af_nicole">af_nicole (US Female - Calm)</option>
-                                <option value="af_aoede">af_aoede (US Female - Deep)</option>
-                                <option value="am_michael">am_michael (US Male - Clear)</option>
-                                <option value="am_adam">am_adam (US Male - Deep)</option>
-                                <option value="bf_emma">bf_emma (UK Female - Crisp)</option>
-                                <option value="bm_george">bm_george (UK Male - Classic)</option>
+                                <option value="af_heart" selected>Heart (Female)</option>
+                                <option value="am_puck">Puck (Male)</option>
+                            </select>
+                        </div>
+
+                        <!-- Acceleration Engine -->
+                        <div class="slider-group">
+                            <div class="slider-header-row">
+                                <span class="slider-label">engine</span>
+                                <span class="slider-val-badge" id="engineModeLabel">webgpu</span>
+                            </div>
+                            <select id="engineSelect" class="settings-select" onchange="changeEngine()">
+                                <option value="auto" selected>Auto (WebGPU GPU accelerated)</option>
+                                <option value="webgpu">WebGPU (Hardware GPU - Fastest)</option>
+                                <option value="wasm">WASM (Universal CPU fallback)</option>
                             </select>
                         </div>
 
@@ -640,14 +660,7 @@
                             <input type="range" id="speedSlider" min="0.60" max="1.25" step="0.05" value="0.85">
                         </div>
 
-                        <!-- Sentence Pause Slider -->
-                        <div class="slider-group">
-                            <div class="slider-header-row">
-                                <span class="slider-label">sentence pause</span>
-                                <span class="slider-val-badge" id="pauseVal">0.6s</span>
-                            </div>
-                            <input type="range" id="pauseSlider" min="0.0" max="1.5" step="0.1" value="0.6">
-                        </div>
+
                     </div>
                 </div>
 
@@ -666,7 +679,7 @@
                     lightweight tts agent is a text-to-speech engine powered by Kokoro-82M, optimized for listening to articles and documents.
                 </p>
                 <p>
-                    It is open source (Apache-2.0), runs 100% locally in the browser with zero external server dependencies, and generates 24kHz studio audio.
+                    It is open source (Apache-2.0), runs 100% locally in the browser with zero external server dependencies, and generates 24kHz studio audio in real time.
                 </p>
             </div>
 
@@ -681,9 +694,9 @@
         const editorBox = document.getElementById('editorBox');
         const speedSlider = document.getElementById('speedSlider');
         const speedVal = document.getElementById('speedVal');
-        const pauseSlider = document.getElementById('pauseSlider');
-        const pauseVal = document.getElementById('pauseVal');
         const voiceSelect = document.getElementById('voiceSelect');
+        const engineSelect = document.getElementById('engineSelect');
+        const engineModeLabel = document.getElementById('engineModeLabel');
         const settingsPopover = document.getElementById('settingsPopover');
         const btnSettings = document.getElementById('btnSettings');
         const btnSpeakAction = document.getElementById('btnSpeakAction');
@@ -696,6 +709,7 @@
         const scrubProgress = document.getElementById('scrubProgress');
         const scrubContainer = document.getElementById('scrubContainer');
         const btnDownload = document.getElementById('btnDownload');
+        const playerFormatLabel = document.getElementById('playerFormatLabel');
 
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
@@ -707,6 +721,14 @@
         let ttsModel = null;
         let isModelReady = false;
         let modelLoadingPromise = null;
+        let currentSynthesisSession = 0;
+
+        // Web Audio Streaming Context & Queue State
+        let audioCtx = null;
+        let scheduledAudioNodes = [];
+        let isStreamingActive = false;
+        let streamPlaybackStartTime = 0;
+        let totalEstimatedDuration = 0;
 
         // Settings Toggle / Close
         window.toggleSettings = function(e) {
@@ -733,13 +755,10 @@
 
         function updateSettingsDisplay() {
             const speed = parseFloat(speedSlider.value).toFixed(2);
-            const pause = parseFloat(pauseSlider.value).toFixed(1);
             speedVal.textContent = `${speed}x`;
-            pauseVal.textContent = `${pause}s`;
         }
 
         speedSlider.addEventListener('input', updateSettingsDisplay);
-        pauseSlider.addEventListener('input', updateSettingsDisplay);
 
         function updateEditorMeta() {
             const text = editor.value;
@@ -760,6 +779,7 @@
             editor.value = '';
             hasGeneratedAudio = false;
             lastSynthesizedText = '';
+            stopStreamingAudio();
             updateEditorMeta();
             
             audioPlayerBar.classList.remove('active');
@@ -805,21 +825,60 @@
             return new Blob([buffer], { type: 'audio/wav' });
         }
 
-        // Initialize Kokoro TTS model with WASM and Q8 quantization for accurate English phonemization
+        // Determine optimal backend (WebGPU with fp32 for hardware acceleration, or WASM q8)
+        async function getOptimalConfig() {
+            const selectedEngine = engineSelect ? engineSelect.value : 'auto';
+            let useWebGPU = false;
+
+            if (selectedEngine === 'webgpu' || selectedEngine === 'auto') {
+                if (typeof navigator !== 'undefined' && navigator.gpu) {
+                    try {
+                        const adapter = await navigator.gpu.requestAdapter();
+                        if (adapter) {
+                            useWebGPU = true;
+                        }
+                    } catch (e) {
+                        console.warn("WebGPU adapter request failed:", e);
+                    }
+                }
+            }
+
+            if (useWebGPU) {
+                engineModeLabel.textContent = 'webgpu (gpu)';
+                return { device: 'webgpu', dtype: 'fp32' };
+            } else {
+                engineModeLabel.textContent = 'wasm (cpu)';
+                return { device: 'wasm', dtype: 'q8' };
+            }
+        }
+
+        window.changeEngine = function() {
+            ttsModel = null;
+            modelLoadingPromise = null;
+            isModelReady = false;
+            setupProgressWrap.classList.remove('done');
+            setupProgressBar.style.width = '0%';
+            initTTS();
+        };
+
+        // Initialize Kokoro TTS model
         async function initTTS() {
             if (ttsModel) return ttsModel;
             if (modelLoadingPromise) return modelLoadingPromise;
 
-            statusText.textContent = 'downloading voice model (one-time setup)...';
+            statusText.textContent = 'preparing neural model...';
             statusDot.className = 'status-dot';
 
             modelLoadingPromise = (async () => {
                 try {
+                    const config = await getOptimalConfig();
                     const modelId = "onnx-community/Kokoro-82M-v1.0-ONNX";
-                    // Using WASM backend with q8 quantization ensures consistent English G2P phonemization across all browsers
+                    
+                    statusText.textContent = `downloading model (${config.device.toUpperCase()})...`;
+
                     ttsModel = await KokoroTTS.from_pretrained(modelId, {
-                        dtype: "q8",
-                        device: "wasm",
+                        dtype: config.dtype,
+                        device: config.device,
                         progress_callback: (progress) => {
                             if (progress.status === 'progress' && progress.total) {
                                 const pct = Math.round((progress.loaded / progress.total) * 100);
@@ -833,7 +892,7 @@
 
                     isModelReady = true;
                     statusDot.className = 'status-dot ready';
-                    statusText.textContent = 'ready (cached locally)';
+                    statusText.textContent = `ready (${config.device.toUpperCase()} · cached locally)`;
                     setupProgressBar.style.width = '100%';
 
                     setTimeout(() => {
@@ -855,14 +914,36 @@
         // Auto-download on page load
         initTTS();
 
-        // Main Synthesis Handler (100% In-Browser)
+        function stopStreamingAudio() {
+            if (scheduledAudioNodes.length > 0) {
+                scheduledAudioNodes.forEach(node => {
+                    try { node.stop(); } catch (e) {}
+                    try { node.disconnect(); } catch (e) {}
+                });
+                scheduledAudioNodes = [];
+            }
+            if (audioCtx) {
+                try { audioCtx.close(); } catch (e) {}
+                audioCtx = null;
+            }
+            isStreamingActive = false;
+        }
+
+        // Instant-Streaming Synthesis & Playback Handler
         window.synthesize = async function() {
             const text = editor.value.trim();
             if (!text) return;
 
             const speed = parseFloat(speedSlider.value);
-            const pauseSec = parseFloat(pauseSlider.value);
+            const pauseSec = 0;
             const voice = voiceSelect ? voiceSelect.value : 'af_heart';
+
+            // Stop any ongoing playback
+            stopStreamingAudio();
+            audioElement.pause();
+
+            currentSynthesisSession++;
+            const sessionId = currentSynthesisSession;
 
             btnSpeakAction.disabled = true;
             editorBox.classList.add('synthesizing');
@@ -872,28 +953,76 @@
                     btnSpeakText.textContent = 'loading model...';
                 }
                 const tts = await initTTS();
-                btnSpeakText.textContent = 'synthesizing...';
+                if (sessionId !== currentSynthesisSession) return;
 
-                // Split text into sentences for natural cadence and pause injection
-                const sentences = text.match(/[^.!?\n]+[.!?\n]*/g) || [text];
+                // Split text into natural sentence chunks
+                const rawSentences = text.match(/[^.!?\n]+[.!?\n]*/g) || [text];
+                const sentences = rawSentences.map(s => s.trim()).filter(s => s.length > 0);
+
+                if (sentences.length === 0) return;
+
+                // Initialize Web Audio Context for zero-latency streaming playback
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                audioCtx = new AudioContextClass({ sampleRate: 24000 });
+                if (audioCtx.state === 'suspended') {
+                    await audioCtx.resume();
+                }
+
+                scheduledAudioNodes = [];
+                isStreamingActive = true;
+                btnPlayPause.textContent = 'pause';
+                audioPlayerBar.classList.add('active');
+
                 const sampleRate = 24000;
                 const silenceSamples = new Float32Array(Math.floor(sampleRate * pauseSec));
                 const audioChunks = [];
+                let nextScheduledTime = audioCtx.currentTime + 0.05; // tiny start buffer
+                streamPlaybackStartTime = nextScheduledTime;
+                totalEstimatedDuration = 0;
+
+                btnSpeakText.textContent = `generating 1/${sentences.length}...`;
 
                 for (let i = 0; i < sentences.length; i++) {
-                    const sentence = sentences[i].trim();
-                    if (!sentence) continue;
+                    if (sessionId !== currentSynthesisSession) return;
 
+                    const sentence = sentences[i];
+                    btnSpeakText.textContent = `generating ${i + 1}/${sentences.length}...`;
+
+                    // Generate audio for this sentence
                     const audioObj = await tts.generate(sentence, {
                         voice: voice,
                         speed: speed
                     });
 
+                    if (sessionId !== currentSynthesisSession) return;
+
                     if (audioObj && audioObj.audio) {
-                        audioChunks.push(audioObj.audio);
+                        const chunkAudio = audioObj.audio;
+                        audioChunks.push(chunkAudio);
+
+                        // Queue this chunk into Web Audio API immediately
+                        const audioBuffer = audioCtx.createBuffer(1, chunkAudio.length, sampleRate);
+                        audioBuffer.copyToChannel(chunkAudio, 0);
+
+                        const sourceNode = audioCtx.createBufferSource();
+                        sourceNode.buffer = audioBuffer;
+                        sourceNode.connect(audioCtx.destination);
+
+                        const startTime = Math.max(audioCtx.currentTime, nextScheduledTime);
+                        sourceNode.start(startTime);
+                        scheduledAudioNodes.push(sourceNode);
+
+                        const chunkDuration = audioBuffer.duration;
+                        nextScheduledTime = startTime + chunkDuration + pauseSec;
+                        totalEstimatedDuration = nextScheduledTime - streamPlaybackStartTime;
+
+                        // Insert silence pause if configured
                         if (pauseSec > 0 && i < sentences.length - 1) {
                             audioChunks.push(silenceSamples);
                         }
+
+                        // Update scrub bar and timecode during streaming
+                        updateStreamingProgress();
                     }
                 }
 
@@ -901,7 +1030,7 @@
                     throw new Error("No audio generated");
                 }
 
-                // Concatenate all chunks into a single audio buffer
+                // Concatenate full audio for the seekable player and download button
                 const totalLength = audioChunks.reduce((acc, chunk) => acc + chunk.length, 0);
                 const fullAudio = new Float32Array(totalLength);
                 let writeOffset = 0;
@@ -910,7 +1039,6 @@
                     writeOffset += chunk.length;
                 }
 
-                // Generate WAV Blob
                 const wavBlob = floatToWavBlob(fullAudio, sampleRate);
                 const audioUrl = URL.createObjectURL(wavBlob);
 
@@ -919,10 +1047,7 @@
 
                 audioElement.src = audioUrl;
                 btnDownload.href = audioUrl;
-                audioPlayerBar.classList.add('active');
-
-                audioElement.play();
-                btnPlayPause.textContent = 'pause';
+                playerFormatLabel.textContent = `24kHz WAV (${(totalLength / sampleRate).toFixed(1)}s)`;
 
                 btnSpeakText.textContent = 'regenerate';
                 btnSpeakAction.className = 'btn-speak-action has-audio';
@@ -936,6 +1061,28 @@
             }
         };
 
+        // Track live progress during streaming
+        function updateStreamingProgress() {
+            if (!isStreamingActive || !audioCtx) return;
+            const elapsed = Math.max(0, audioCtx.currentTime - streamPlaybackStartTime);
+            const duration = Math.max(elapsed, totalEstimatedDuration);
+            
+            if (duration > 0) {
+                const pct = Math.min(100, (elapsed / duration) * 100);
+                scrubProgress.style.width = `${pct}%`;
+                timecode.textContent = `${formatTime(elapsed)} / ${formatTime(duration)}`;
+            }
+
+            if (elapsed < duration + 0.5) {
+                requestAnimationFrame(updateStreamingProgress);
+            } else {
+                if (isStreamingActive) {
+                    btnPlayPause.textContent = 'play';
+                    scrubProgress.style.width = '0%';
+                }
+            }
+        }
+
         // Audio Player Controls
         function formatTime(secs) {
             if (isNaN(secs)) return '00:00';
@@ -945,6 +1092,19 @@
         }
 
         window.togglePlayback = function() {
+            // If streaming AudioContext is active
+            if (audioCtx && isStreamingActive) {
+                if (audioCtx.state === 'running') {
+                    audioCtx.suspend();
+                    btnPlayPause.textContent = 'play';
+                } else if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                    btnPlayPause.textContent = 'pause';
+                }
+                return;
+            }
+
+            // Otherwise standard audio element playback
             if (!audioElement.src) return;
             if (audioElement.paused) {
                 audioElement.play();
@@ -956,6 +1116,7 @@
         };
 
         audioElement.addEventListener('timeupdate', () => {
+            if (isStreamingActive) return;
             const current = audioElement.currentTime;
             const duration = audioElement.duration || 0;
             const percent = duration > 0 ? (current / duration) * 100 : 0;
@@ -977,10 +1138,14 @@
         });
 
         window.seekAudio = function(e) {
+            stopStreamingAudio();
             const rect = scrubContainer.getBoundingClientRect();
             const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
             if (audioElement.duration) {
                 audioElement.currentTime = pos * audioElement.duration;
+                if (audioElement.paused) {
+                    audioElement.play();
+                }
             }
         };
 
