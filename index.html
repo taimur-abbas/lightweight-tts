@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>lightweight tts agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --background: #ffffff;
+            --surface: #fafafa;
+            --surface-subtle: #f5f5f5;
+            --border: #e5e5e5;
+            --border-hover: #d4d4d4;
+            --border-focus: #171717;
+            --text-bright: #171717;
+            --text-normal: #262626;
+            --text-muted: #626262;
+            --text-faint: #9e9e9e;
+            --status-green: #16a34a;
+            --status-amber: #d97706;
+            --status-red: #dc2626;
+            --font-mono: "Geist Mono", "Geist Mono NF", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+            --line-height: 19.5px;
+            --font-size: 14px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            background-color: var(--background);
+            color: var(--text-normal);
+            font-family: var(--font-mono);
+            font-size: var(--font-size);
+            line-height: var(--line-height);
+            letter-spacing: 0;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        .page-wrap {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 48px 24px 80px 24px;
+        }
+
+        .tts-container {
+            width: 75vw;
+            max-width: 1100px;
+            min-width: 340px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            position: relative;
+        }
+
+        /* Page Header */
+        .page-header {
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            user-select: none;
+            padding: 0 2px;
+        }
+
+        .heading-title {
+            font-size: 15px;
+            font-weight: 500;
+            color: var(--text-bright);
+            letter-spacing: -0.01em;
+        }
+
+        /* Bounded Text Box (70vh height, 75vw width) */
+        .editor-box {
+            height: 70vh;
+            background: var(--background);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            display: flex;
+            overflow: hidden;
+            transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        }
+
+        .editor-box:focus-within {
+            border-color: var(--border-focus);
+        }
+
+        .editor-box.synthesizing {
+            border-color: var(--status-amber);
+        }
+
+        /* Text Editor */
+        .text-editor {
+            flex: 1;
+            width: 100%;
+            height: 100%;
+            background: transparent;
+            border: none;
+            outline: none;
+            padding: 18px 20px;
+            color: var(--text-bright);
+            font-family: var(--font-mono);
+            font-size: var(--font-size);
+            line-height: var(--line-height);
+            resize: none;
+            white-space: pre-wrap;
+            word-break: break-word;
+            caret-color: var(--text-bright);
+        }
+
+        .text-editor::placeholder {
+            color: var(--text-faint);
+        }
+
+        /* Audio Player Bar (Height matched to Controls Bar: 60px) */
+        .audio-player-bar {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 14px 18px;
+            min-height: 60px;
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            user-select: none;
+            animation: slideDown 0.2s ease-out;
+        }
+
+        .audio-player-bar.active {
+            display: flex;
+        }
+
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .player-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .btn-play-pause {
+            background: var(--text-bright);
+            color: #ffffff;
+            border: none;
+            padding: 6px 14px;
+            height: 32px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.15s;
+        }
+
+        .btn-play-pause:hover {
+            opacity: 0.88;
+        }
+
+        .timecode {
+            font-size: 13px;
+            color: var(--text-muted);
+            min-width: 95px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .scrub-track-container {
+            flex: 1;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .scrub-track {
+            width: 100%;
+            height: 5px;
+            background: var(--border);
+            border-radius: 3px;
+            position: relative;
+            overflow: hidden;
+            transition: height 0.1s ease;
+        }
+
+        .scrub-track-container:hover .scrub-track {
+            height: 7px;
+        }
+
+        .scrub-progress {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            background: var(--text-bright);
+            width: 0%;
+            border-radius: 3px;
+            pointer-events: none;
+        }
+
+        .player-right {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .btn-download-link {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-normal);
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .btn-download-link:hover {
+            border-color: var(--border-hover);
+            color: var(--text-bright);
+            background: var(--surface-subtle);
+        }
+
+        /* Controls Bar (min-height 60px) */
+        .controls-bar {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 14px 18px;
+            min-height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            user-select: none;
+            position: relative;
+        }
+
+        .controls-left {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        /* Settings Button */
+        .btn-settings {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            border-radius: 5px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            transition: all 0.15s;
+        }
+
+        .btn-settings:hover, .btn-settings.active {
+            color: var(--text-bright);
+            border-color: var(--border-hover);
+            background: var(--surface-subtle);
+        }
+
+        /* Settings Popover Dropdown */
+        .settings-popover {
+            position: absolute;
+            bottom: calc(100% + 10px);
+            left: 0;
+            background: var(--background);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+            padding: 18px 20px;
+            width: 340px;
+            display: none;
+            flex-direction: column;
+            gap: 16px;
+            z-index: 50;
+            animation: popoverFade 0.15s ease-out;
+        }
+
+        .settings-popover.show {
+            display: flex;
+        }
+
+        @keyframes popoverFade {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .popover-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+
+        .popover-close {
+            cursor: pointer;
+            color: var(--text-faint);
+            font-size: 11px;
+        }
+
+        .popover-close:hover {
+            color: var(--text-bright);
+        }
+
+        .slider-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .slider-header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+        }
+
+        .slider-label {
+            color: var(--text-muted);
+            text-transform: lowercase;
+        }
+
+        .slider-val-badge {
+            color: var(--text-bright);
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 5px;
+            background: var(--border);
+            border-radius: 3px;
+            outline: none;
+            cursor: pointer;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background: var(--text-bright);
+            cursor: pointer;
+            transition: transform 0.1s ease;
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        .controls-right {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .btn-clear {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            border-radius: 5px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .btn-clear:hover {
+            color: var(--text-bright);
+            border-color: var(--border-hover);
+            background: var(--surface-subtle);
+        }
+
+        .btn-speak-action {
+            background: var(--text-bright);
+            color: #ffffff;
+            border: 1px solid var(--text-bright);
+            padding: 9px 20px;
+            border-radius: 5px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.15s;
+        }
+
+        .btn-speak-action:hover {
+            opacity: 0.88;
+            transform: translateY(-1px);
+        }
+
+        .btn-speak-action:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-speak-action.has-audio {
+            background: var(--surface-subtle);
+            color: var(--text-bright);
+            border-color: var(--border);
+        }
+
+        .btn-speak-action.has-audio:hover {
+            border-color: var(--border-hover);
+            background: #ededed;
+        }
+
+        kbd {
+            background: rgba(0, 0, 0, 0.07);
+            border: 1px solid rgba(0, 0, 0, 0.12);
+            border-radius: 3px;
+            padding: 2px 5px;
+            font-size: 11px;
+            color: inherit;
+        }
+
+        /* Site Description with Generous Spacing */
+        .site-description {
+            margin-top: 36px;
+            margin-bottom: 24px;
+            padding: 0 2px;
+            font-size: 13px;
+            line-height: 22px;
+            color: var(--text-muted);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .site-description p {
+            margin: 0;
+        }
+
+        @media (max-width: 900px) {
+            .tts-container {
+                width: 92vw;
+            }
+            .settings-popover {
+                width: 290px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="page-wrap">
+        <div class="tts-container">
+
+            <!-- Simple Heading -->
+            <div class="page-header">
+                <div class="heading-title">
+                    lightweight tts agent
+                </div>
+            </div>
+
+            <!-- Bounded 70vh Text Area -->
+            <div class="editor-box" id="editorBox">
+                <textarea 
+                    id="textEditor" 
+                    class="text-editor" 
+                    placeholder="Paste an article or document text here to read aloud..."
+                    spellcheck="false"
+                ></textarea>
+            </div>
+
+            <!-- Audio Player Bar (Matching Controls Bar Height) -->
+            <div class="audio-player-bar" id="audioPlayerBar">
+                <div class="player-left">
+                    <button class="btn-play-pause" id="btnPlayPause" onclick="togglePlayback()" title="Play / Pause (Space)">play</button>
+                    <div class="timecode" id="timecode">00:00 / 00:00</div>
+                </div>
+
+                <div class="scrub-track-container" id="scrubContainer" onclick="seekAudio(event)">
+                    <div class="scrub-track">
+                        <div class="scrub-progress" id="scrubProgress"></div>
+                    </div>
+                </div>
+
+                <div class="player-right">
+                    <span>24kHz WAV</span>
+                    <a class="btn-download-link" id="btnDownload" href="#" download="speech.wav">download</a>
+                </div>
+                <audio id="audioElement" style="display: none;"></audio>
+            </div>
+
+            <!-- Clean Controls Bar with Settings Popover -->
+            <div class="controls-bar">
+                <div class="controls-left">
+                    <!-- Settings Button -->
+                    <button class="btn-settings" id="btnSettings" onclick="toggleSettings(event)">
+                        settings
+                    </button>
+
+                    <!-- Popover Dropdown -->
+                    <div class="settings-popover" id="settingsPopover" onclick="event.stopPropagation()">
+                        <div class="popover-header">
+                            <span>voice settings</span>
+                            <span class="popover-close" onclick="closeSettings()">✕</span>
+                        </div>
+
+                        <!-- Speed Slider -->
+                        <div class="slider-group">
+                            <div class="slider-header-row">
+                                <span class="slider-label">speed</span>
+                                <span class="slider-val-badge" id="speedVal">0.85x</span>
+                            </div>
+                            <input type="range" id="speedSlider" min="0.60" max="1.25" step="0.05" value="0.85">
+                        </div>
+
+                        <!-- Sentence Pause Slider -->
+                        <div class="slider-group">
+                            <div class="slider-header-row">
+                                <span class="slider-label">sentence pause</span>
+                                <span class="slider-val-badge" id="pauseVal">0.6s</span>
+                            </div>
+                            <input type="range" id="pauseSlider" min="0.0" max="1.5" step="0.1" value="0.6">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="controls-right">
+                    <button class="btn-clear" onclick="clearText()">clear</button>
+                    <button class="btn-speak-action" id="btnSpeakAction" onclick="synthesize()">
+                        <span id="btnSpeakText">speak</span>
+                        <span style="opacity: 0.8; font-size: 11px;"><kbd>⌘↵</kbd></span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Site Description -->
+            <div class="site-description">
+                <p>
+                    lightweight tts agent is a text-to-speech engine powered by Kokoro-82M, optimized for listening to articles and documents.
+                </p>
+                <p>
+                    It is open source (Apache-2.0), runs self-hosted with zero external API dependencies, and generates 24kHz audio in real time.
+                </p>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Client-Side Kokoro In-Browser TTS Engine -->
+    <script type="module">
+        import { KokoroTTS } from "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/dist/kokoro.web.min.js";
+
+        const editor = document.getElementById('textEditor');
+        const editorBox = document.getElementById('editorBox');
+        const speedSlider = document.getElementById('speedSlider');
+        const speedVal = document.getElementById('speedVal');
+        const pauseSlider = document.getElementById('pauseSlider');
+        const pauseVal = document.getElementById('pauseVal');
+        const settingsPopover = document.getElementById('settingsPopover');
+        const btnSettings = document.getElementById('btnSettings');
+        const btnSpeakAction = document.getElementById('btnSpeakAction');
+        const btnSpeakText = document.getElementById('btnSpeakText');
+
+        const audioPlayerBar = document.getElementById('audioPlayerBar');
+        const audioElement = document.getElementById('audioElement');
+        const btnPlayPause = document.getElementById('btnPlayPause');
+        const timecode = document.getElementById('timecode');
+        const scrubProgress = document.getElementById('scrubProgress');
+        const scrubContainer = document.getElementById('scrubContainer');
+        const btnDownload = document.getElementById('btnDownload');
+
+        let hasGeneratedAudio = false;
+        let lastSynthesizedText = '';
+        let ttsModel = null;
+        let isModelLoading = false;
+
+        // Settings Toggle / Close
+        window.toggleSettings = function(e) {
+            if (e) e.stopPropagation();
+            const isOpen = settingsPopover.classList.contains('show');
+            if (isOpen) {
+                closeSettings();
+            } else {
+                settingsPopover.classList.add('show');
+                btnSettings.classList.add('active');
+            }
+        };
+
+        window.closeSettings = function() {
+            settingsPopover.classList.remove('show');
+            btnSettings.classList.remove('active');
+        };
+
+        document.addEventListener('click', (e) => {
+            if (!settingsPopover.contains(e.target) && e.target !== btnSettings) {
+                closeSettings();
+            }
+        });
+
+        function updateSettingsDisplay() {
+            const speed = parseFloat(speedSlider.value).toFixed(2);
+            const pause = parseFloat(pauseSlider.value).toFixed(1);
+            speedVal.textContent = `${speed}x`;
+            pauseVal.textContent = `${pause}s`;
+        }
+
+        speedSlider.addEventListener('input', updateSettingsDisplay);
+        pauseSlider.addEventListener('input', updateSettingsDisplay);
+
+        function updateEditorMeta() {
+            const text = editor.value;
+            if (hasGeneratedAudio) {
+                if (text !== lastSynthesizedText) {
+                    btnSpeakText.textContent = 'regenerate';
+                    btnSpeakAction.className = 'btn-speak-action';
+                } else {
+                    btnSpeakText.textContent = 'regenerate';
+                    btnSpeakAction.className = 'btn-speak-action has-audio';
+                }
+            }
+        }
+
+        editor.addEventListener('input', updateEditorMeta);
+
+        window.clearText = function() {
+            editor.value = '';
+            hasGeneratedAudio = false;
+            lastSynthesizedText = '';
+            updateEditorMeta();
+            
+            audioPlayerBar.classList.remove('active');
+            audioElement.pause();
+            audioElement.src = '';
+            
+            btnSpeakText.textContent = 'speak';
+            btnSpeakAction.className = 'btn-speak-action';
+        };
+
+        // Convert Float32Array PCM samples to WAV Blob in pure browser JS
+        function floatToWavBlob(samples, sampleRate = 24000) {
+            const buffer = new ArrayBuffer(44 + samples.length * 2);
+            const view = new DataView(buffer);
+
+            function writeString(view, offset, string) {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            }
+
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + samples.length * 2, true);
+            writeString(view, 8, 'WAVE');
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true); // PCM format
+            view.setUint16(22, 1, true); // Mono channel
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true); // 16-bit
+            writeString(view, 36, 'data');
+            view.setUint32(40, samples.length * 2, true);
+
+            let offset = 44;
+            for (let i = 0; i < samples.length; i++) {
+                let s = Math.max(-1, Math.min(1, samples[i]));
+                view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+                offset += 2;
+            }
+
+            return new Blob([buffer], { type: 'audio/wav' });
+        }
+
+        // Lazy-load Kokoro in-browser ONNX model with WebGPU / WASM
+        async function getOrInitTTS() {
+            if (ttsModel) return ttsModel;
+            isModelLoading = true;
+            btnSpeakText.textContent = 'loading model...';
+
+            const modelId = "onnx-community/Kokoro-82M-v1.0-ONNX";
+            const device = navigator.gpu ? "webgpu" : "wasm";
+
+            ttsModel = await KokoroTTS.from_pretrained(modelId, {
+                dtype: "q8",
+                device: device,
+                progress_callback: (progress) => {
+                    if (progress.status === 'progress' && progress.total) {
+                        const pct = Math.round((progress.loaded / progress.total) * 100);
+                        btnSpeakText.textContent = `loading model (${pct}%)...`;
+                    }
+                }
+            });
+
+            isModelLoading = false;
+            return ttsModel;
+        }
+
+        // Main Synthesis Handler (100% In-Browser)
+        window.synthesize = async function() {
+            const text = editor.value.trim();
+            if (!text) return;
+
+            const speed = parseFloat(speedSlider.value);
+            const pauseSec = parseFloat(pauseSlider.value);
+
+            btnSpeakAction.disabled = true;
+            editorBox.classList.add('synthesizing');
+
+            try {
+                const tts = await getOrInitTTS();
+                btnSpeakText.textContent = 'synthesizing...';
+
+                // Split text into sentences for natural pause injection
+                const sentences = text.match(/[^.!?\n]+[.!?\n]+/g) || [text];
+                const sampleRate = 24000;
+                const silenceSamples = new Float32Array(Math.floor(sampleRate * pauseSec));
+                const audioChunks = [];
+
+                for (let i = 0; i < sentences.length; i++) {
+                    const sentence = sentences[i].trim();
+                    if (!sentence) continue;
+
+                    const audioObj = await tts.generate(sentence, {
+                        voice: 'af_heart',
+                        speed: speed
+                    });
+
+                    if (audioObj && audioObj.audio) {
+                        audioChunks.push(audioObj.audio);
+                        if (pauseSec > 0 && i < sentences.length - 1) {
+                            audioChunks.push(silenceSamples);
+                        }
+                    }
+                }
+
+                if (audioChunks.length === 0) {
+                    throw new Error("No audio generated");
+                }
+
+                // Concatenate all chunks into a single audio buffer
+                const totalLength = audioChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+                const fullAudio = new Float32Array(totalLength);
+                let writeOffset = 0;
+                for (const chunk of audioChunks) {
+                    fullAudio.set(chunk, writeOffset);
+                    writeOffset += chunk.length;
+                }
+
+                // Generate WAV Blob
+                const wavBlob = floatToWavBlob(fullAudio, sampleRate);
+                const audioUrl = URL.createObjectURL(wavBlob);
+
+                lastSynthesizedText = text;
+                hasGeneratedAudio = true;
+
+                audioElement.src = audioUrl;
+                btnDownload.href = audioUrl;
+                audioPlayerBar.classList.add('active');
+
+                audioElement.play();
+                btnPlayPause.textContent = 'pause';
+
+                btnSpeakText.textContent = 'regenerate';
+                btnSpeakAction.className = 'btn-speak-action has-audio';
+
+            } catch (err) {
+                console.error("Synthesis error:", err);
+                btnSpeakText.textContent = 'speak';
+            } finally {
+                btnSpeakAction.disabled = false;
+                editorBox.classList.remove('synthesizing');
+            }
+        };
+
+        // Audio Player Controls
+        function formatTime(secs) {
+            if (isNaN(secs)) return '00:00';
+            const m = Math.floor(secs / 60);
+            const s = Math.floor(secs % 60);
+            return `${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
+        }
+
+        window.togglePlayback = function() {
+            if (!audioElement.src) return;
+            if (audioElement.paused) {
+                audioElement.play();
+                btnPlayPause.textContent = 'pause';
+            } else {
+                audioElement.pause();
+                btnPlayPause.textContent = 'play';
+            }
+        };
+
+        audioElement.addEventListener('timeupdate', () => {
+            const current = audioElement.currentTime;
+            const duration = audioElement.duration || 0;
+            const percent = duration > 0 ? (current / duration) * 100 : 0;
+            scrubProgress.style.width = `${percent}%`;
+            timecode.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
+        });
+
+        audioElement.addEventListener('ended', () => {
+            btnPlayPause.textContent = 'play';
+            scrubProgress.style.width = '0%';
+        });
+
+        audioElement.addEventListener('play', () => {
+            btnPlayPause.textContent = 'pause';
+        });
+
+        audioElement.addEventListener('pause', () => {
+            btnPlayPause.textContent = 'play';
+        });
+
+        window.seekAudio = function(e) {
+            const rect = scrubContainer.getBoundingClientRect();
+            const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            if (audioElement.duration) {
+                audioElement.currentTime = pos * audioElement.duration;
+            }
+        };
+
+        // Global Shortcuts
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeSettings();
+            }
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault();
+                synthesize();
+            }
+            if (e.code === 'Space' && document.activeElement !== editor && hasGeneratedAudio) {
+                e.preventDefault();
+                togglePlayback();
+            }
+        });
+
+        // Initialize display
+        updateSettingsDisplay();
+        updateEditorMeta();
+    </script>
+</body>
+</html>
