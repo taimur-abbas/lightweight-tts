@@ -69,7 +69,7 @@
         .page-header {
             display: flex;
             align-items: center;
-            justify-content: flex-start;
+            justify-content: space-between;
             user-select: none;
             padding: 0 2px;
         }
@@ -79,6 +79,59 @@
             font-weight: 500;
             color: var(--text-bright);
             letter-spacing: -0.01em;
+        }
+
+        .model-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: var(--text-muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background-color: var(--status-amber);
+            transition: background-color 0.2s ease;
+            display: inline-block;
+        }
+
+        .status-dot.ready {
+            background-color: var(--status-green);
+        }
+
+        .status-dot.error {
+            background-color: var(--status-red);
+        }
+
+        /* Setup Progress Bar (One-Time Download) */
+        .setup-progress-wrap {
+            width: 100%;
+            height: 3px;
+            background: var(--surface-subtle);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: -4px;
+            margin-bottom: 2px;
+            transition: opacity 0.4s ease, height 0.4s ease, margin 0.4s ease;
+        }
+
+        .setup-progress-wrap.done {
+            opacity: 0;
+            height: 0;
+            margin-top: 0;
+            margin-bottom: 0;
+            pointer-events: none;
+        }
+
+        .setup-progress-bar {
+            height: 100%;
+            width: 0%;
+            background: var(--text-bright);
+            transition: width 0.15s ease-out;
         }
 
         /* Bounded Text Box (70vh height, 75vw width) */
@@ -356,6 +409,23 @@
             font-variant-numeric: tabular-nums;
         }
 
+        .settings-select {
+            width: 100%;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-bright);
+            outline: none;
+            cursor: pointer;
+        }
+
+        .settings-select:focus {
+            border-color: var(--border-focus);
+        }
+
         input[type="range"] {
             -webkit-appearance: none;
             width: 100%;
@@ -483,11 +553,20 @@
     <div class="page-wrap">
         <div class="tts-container">
 
-            <!-- Simple Heading -->
+            <!-- Simple Heading with Status Indicator -->
             <div class="page-header">
                 <div class="heading-title">
                     lightweight tts agent
                 </div>
+                <div class="model-status" id="modelStatus">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span id="statusText">preparing model...</span>
+                </div>
+            </div>
+
+            <!-- One-Time Setup Progress Bar -->
+            <div class="setup-progress-wrap" id="setupProgressWrap">
+                <div class="setup-progress-bar" id="setupProgressBar"></div>
             </div>
 
             <!-- Bounded 70vh Text Area -->
@@ -535,6 +614,23 @@
                             <span class="popover-close" onclick="closeSettings()">✕</span>
                         </div>
 
+                        <!-- Voice Dropdown -->
+                        <div class="slider-group">
+                            <div class="slider-header-row">
+                                <span class="slider-label">voice</span>
+                            </div>
+                            <select id="voiceSelect" class="settings-select">
+                                <option value="af_heart" selected>af_heart (US Female - Studio)</option>
+                                <option value="af_bella">af_bella (US Female - Warm)</option>
+                                <option value="af_nicole">af_nicole (US Female - Calm)</option>
+                                <option value="af_aoede">af_aoede (US Female - Deep)</option>
+                                <option value="am_michael">am_michael (US Male - Clear)</option>
+                                <option value="am_adam">am_adam (US Male - Deep)</option>
+                                <option value="bf_emma">bf_emma (UK Female - Crisp)</option>
+                                <option value="bm_george">bm_george (UK Male - Classic)</option>
+                            </select>
+                        </div>
+
                         <!-- Speed Slider -->
                         <div class="slider-group">
                             <div class="slider-header-row">
@@ -570,7 +666,7 @@
                     lightweight tts agent is a text-to-speech engine powered by Kokoro-82M, optimized for listening to articles and documents.
                 </p>
                 <p>
-                    It is open source (Apache-2.0), runs self-hosted with zero external API dependencies, and generates 24kHz audio in real time.
+                    It is open source (Apache-2.0), runs 100% locally in the browser with zero external server dependencies, and generates 24kHz studio audio.
                 </p>
             </div>
 
@@ -587,6 +683,7 @@
         const speedVal = document.getElementById('speedVal');
         const pauseSlider = document.getElementById('pauseSlider');
         const pauseVal = document.getElementById('pauseVal');
+        const voiceSelect = document.getElementById('voiceSelect');
         const settingsPopover = document.getElementById('settingsPopover');
         const btnSettings = document.getElementById('btnSettings');
         const btnSpeakAction = document.getElementById('btnSpeakAction');
@@ -600,10 +697,16 @@
         const scrubContainer = document.getElementById('scrubContainer');
         const btnDownload = document.getElementById('btnDownload');
 
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const setupProgressWrap = document.getElementById('setupProgressWrap');
+        const setupProgressBar = document.getElementById('setupProgressBar');
+
         let hasGeneratedAudio = false;
         let lastSynthesizedText = '';
         let ttsModel = null;
-        let isModelLoading = false;
+        let isModelReady = false;
+        let modelLoadingPromise = null;
 
         // Settings Toggle / Close
         window.toggleSettings = function(e) {
@@ -702,29 +805,55 @@
             return new Blob([buffer], { type: 'audio/wav' });
         }
 
-        // Lazy-load Kokoro in-browser ONNX model with WebGPU / WASM
-        async function getOrInitTTS() {
+        // Initialize Kokoro TTS model with WASM and Q8 quantization for accurate English phonemization
+        async function initTTS() {
             if (ttsModel) return ttsModel;
-            isModelLoading = true;
-            btnSpeakText.textContent = 'loading model...';
+            if (modelLoadingPromise) return modelLoadingPromise;
 
-            const modelId = "onnx-community/Kokoro-82M-v1.0-ONNX";
-            const device = navigator.gpu ? "webgpu" : "wasm";
+            statusText.textContent = 'downloading voice model (one-time setup)...';
+            statusDot.className = 'status-dot';
 
-            ttsModel = await KokoroTTS.from_pretrained(modelId, {
-                dtype: "q8",
-                device: device,
-                progress_callback: (progress) => {
-                    if (progress.status === 'progress' && progress.total) {
-                        const pct = Math.round((progress.loaded / progress.total) * 100);
-                        btnSpeakText.textContent = `loading model (${pct}%)...`;
-                    }
+            modelLoadingPromise = (async () => {
+                try {
+                    const modelId = "onnx-community/Kokoro-82M-v1.0-ONNX";
+                    // Using WASM backend with q8 quantization ensures consistent English G2P phonemization across all browsers
+                    ttsModel = await KokoroTTS.from_pretrained(modelId, {
+                        dtype: "q8",
+                        device: "wasm",
+                        progress_callback: (progress) => {
+                            if (progress.status === 'progress' && progress.total) {
+                                const pct = Math.round((progress.loaded / progress.total) * 100);
+                                setupProgressBar.style.width = `${pct}%`;
+                                statusText.textContent = `downloading model (${pct}%)...`;
+                            } else if (progress.status === 'ready' || progress.status === 'done') {
+                                setupProgressBar.style.width = '100%';
+                            }
+                        }
+                    });
+
+                    isModelReady = true;
+                    statusDot.className = 'status-dot ready';
+                    statusText.textContent = 'ready (cached locally)';
+                    setupProgressBar.style.width = '100%';
+
+                    setTimeout(() => {
+                        setupProgressWrap.classList.add('done');
+                    }, 800);
+
+                    return ttsModel;
+                } catch (err) {
+                    console.error("Model load error:", err);
+                    statusDot.className = 'status-dot error';
+                    statusText.textContent = 'failed to load model';
+                    throw err;
                 }
-            });
+            })();
 
-            isModelLoading = false;
-            return ttsModel;
+            return modelLoadingPromise;
         }
+
+        // Auto-download on page load
+        initTTS();
 
         // Main Synthesis Handler (100% In-Browser)
         window.synthesize = async function() {
@@ -733,16 +862,20 @@
 
             const speed = parseFloat(speedSlider.value);
             const pauseSec = parseFloat(pauseSlider.value);
+            const voice = voiceSelect ? voiceSelect.value : 'af_heart';
 
             btnSpeakAction.disabled = true;
             editorBox.classList.add('synthesizing');
 
             try {
-                const tts = await getOrInitTTS();
+                if (!isModelReady) {
+                    btnSpeakText.textContent = 'loading model...';
+                }
+                const tts = await initTTS();
                 btnSpeakText.textContent = 'synthesizing...';
 
-                // Split text into sentences for natural pause injection
-                const sentences = text.match(/[^.!?\n]+[.!?\n]+/g) || [text];
+                // Split text into sentences for natural cadence and pause injection
+                const sentences = text.match(/[^.!?\n]+[.!?\n]*/g) || [text];
                 const sampleRate = 24000;
                 const silenceSamples = new Float32Array(Math.floor(sampleRate * pauseSec));
                 const audioChunks = [];
@@ -752,7 +885,7 @@
                     if (!sentence) continue;
 
                     const audioObj = await tts.generate(sentence, {
-                        voice: 'af_heart',
+                        voice: voice,
                         speed: speed
                     });
 
@@ -796,7 +929,7 @@
 
             } catch (err) {
                 console.error("Synthesis error:", err);
-                btnSpeakText.textContent = 'speak';
+                btnSpeakText.textContent = hasGeneratedAudio ? 'regenerate' : 'speak';
             } finally {
                 btnSpeakAction.disabled = false;
                 editorBox.classList.remove('synthesizing');
