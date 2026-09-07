@@ -1,4 +1,4 @@
-# lightweight-tts
+# lightweight tts reader
 
 A lightweight, private text-to-speech engine powered by Kokoro-82M, running 100% in the browser via WebGPU and WebAssembly.
 
@@ -9,7 +9,7 @@ https://taimur-abbas.github.io/lightweight-tts/
 - **100% In-Browser & Private:** Zero backend server. Your text is processed entirely on your device and never leaves your browser.
 - **Neural Speech Quality:** Powered by Kokoro-82M with natural prosody and cadence.
 - **WebGPU Accelerated:** Real-time speech synthesis on modern browsers with WebAssembly fallback.
-- **Minimalist UI:** Clean typography, interactive scrub track, and ergonomic speed and sentence pause controls.
+- **Minimalist UI:** Clean typography, interactive scrub track, and ergonomic speed controls.
 
 ## License
 Apache-2.0
